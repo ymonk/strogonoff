@@ -2,14 +2,14 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-package strogonoff 
+package strogonoff
 
 import (
 	"bufio"
+	"errors"
 	"image"
-	"image/ycbcr"
+	"image/color"
 	"io"
-	"os"
 )
 
 // min returns the minimum of two integers.
@@ -207,9 +207,9 @@ func init() {
 
 // writer is a buffered writer.
 type writer interface {
-	Flush() os.Error
-	Write([]byte) (int, os.Error)
-	WriteByte(byte) os.Error
+	Flush() error
+	Write([]byte) (int, error)
+	WriteByte(byte) error
 }
 
 // encoder encodes an image to the JPEG format.
@@ -217,9 +217,9 @@ type encoder struct {
 	// w is the writer to write to. err is the first error encountered during
 	// writing. All attempted writes after the first error become no-ops.
 	w   writer
-	err os.Error
+	err error
 	// data is the message that will be hidden
-	data []byte
+	data     []byte
 	data_pos int
 	// buf is a scratch buffer.
 	buf [16]byte
@@ -362,25 +362,29 @@ func (e *encoder) writeBlock(b *block, q quantIndex, prevDC int) int {
 		ac := div(b[unzig[k]], (8 * int(e.quant[q][k])))
 
 		//steganography
-		if q == 0 && (ac < -1 || ac > 1) && (e.data_pos / 8 <= len(e.data)) {
+		if q == 0 && (ac < -1 || ac > 1) && (e.data_pos/8 <= len(e.data)) {
 			var data_byte int
-			if e.data_pos / 8 == len(e.data) {
+			if e.data_pos/8 == len(e.data) {
 				data_byte = 0 // null terminated string
 			} else {
-				data_byte = int(e.data[e.data_pos / 8])
+				data_byte = int(e.data[e.data_pos/8])
 			}
-			mask := int(1 << uint(7 - e.data_pos % 8))
+			mask := int(1 << uint(7-e.data_pos%8))
 			data_bit := data_byte & mask
 
 			// use LSB to store data bit
 			negative := ac < 0
-			if negative { ac = -ac }
+			if negative {
+				ac = -ac
+			}
 			if data_bit != 0 {
 				ac |= 1
 			} else {
 				ac &= ^1
 			}
-			if negative { ac = -ac }
+			if negative {
+				ac = -ac
+			}
 
 			e.data_pos++
 		}
@@ -411,7 +415,7 @@ func toYCbCr(m image.Image, p image.Point, yBlock, cbBlock, crBlock *block) {
 	for j := 0; j < 8; j++ {
 		for i := 0; i < 8; i++ {
 			r, g, b, _ := m.At(min(p.X+i, xmax), min(p.Y+j, ymax)).RGBA()
-			yy, cb, cr := ycbcr.RGBToYCbCr(uint8(r>>8), uint8(g>>8), uint8(b>>8))
+			yy, cb, cr := color.RGBToYCbCr(uint8(r>>8), uint8(g>>8), uint8(b>>8))
 			yBlock[8*j+i] = int(yy)
 			cbBlock[8*j+i] = int(cb)
 			crBlock[8*j+i] = int(cr)
@@ -435,8 +439,12 @@ func rgbaToYCbCr(m *image.RGBA, p image.Point, yBlock, cbBlock, crBlock *block) 
 			if sx > xmax {
 				sx = xmax
 			}
-			col := &m.Pix[yoff+sx]
-			yy, cb, cr := ycbcr.RGBToYCbCr(col.R, col.G, col.B)
+			//col := &m.Pix[yoff+sx]
+			R := m.Pix[yoff+sx*4]
+			G := m.Pix[yoff+sx*4+1]
+			B := m.Pix[yoff+sx*4+2]
+			// yy, cb, cr := color.RGBToYCbCr(col.R, col.G, col.B)
+			yy, cb, cr := color.RGBToYCbCr(R, G, B)
 			yBlock[8*j+i] = int(yy)
 			cbBlock[8*j+i] = int(cb)
 			crBlock[8*j+i] = int(cr)
@@ -519,10 +527,10 @@ type Options struct {
 
 // Encode writes the Image m to w in JPEG 4:2:0 baseline format with the given
 // options. Default parameters are used if a nil *Options is passed.
-func Encode(w io.Writer, m image.Image, message string, o *Options) os.Error {
+func Encode(w io.Writer, m image.Image, message string, o *Options) error {
 	b := m.Bounds()
 	if b.Dx() >= 1<<16 || b.Dy() >= 1<<16 {
-		return os.NewError("jpeg: image is too large to encode")
+		return errors.New("jpeg: image is too large to encode")
 	}
 	var e encoder
 	e.data = []byte(message)

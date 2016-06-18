@@ -2,15 +2,18 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-package strogonoff 
+package strogonoff
 
 import (
 	"bytes"
 	"image"
+	"image/color"
+	"image/jpeg"
 	"image/png"
 	"io/ioutil"
-	"rand"
+	"math/rand"
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -25,6 +28,16 @@ var testCase = []struct {
 	{"testdata/video-001.png", 80, 6 << 8},
 	{"testdata/video-001.png", 90, 4 << 8},
 	{"testdata/video-001.png", 100, 2 << 8},
+	{"testdata/lena.png", 20, 12 << 8},
+	{"testdata/lena.png", 60, 8 << 8},
+	{"testdata/lena.png", 80, 6 << 8},
+	{"testdata/lena.png", 90, 4 << 8},
+	{"testdata/lena.png", 100, 4 << 8},
+	{"testdata/lena2.jpg", 20, 12 << 8},
+	{"testdata/lena2.jpg", 60, 8 << 8},
+	{"testdata/lena2.jpg", 80, 6 << 8},
+	{"testdata/lena2.jpg", 90, 4 << 8},
+	{"testdata/lena2.jpg", 100, 4 << 8},
 }
 
 func delta(u0, u1 uint32) int64 {
@@ -35,7 +48,7 @@ func delta(u0, u1 uint32) int64 {
 	return d
 }
 
-func readPng(filename string) (image.Image, os.Error) {
+func readPng(filename string) (image.Image, error) {
 	f, err := os.Open(filename)
 	if err != nil {
 		return nil, err
@@ -44,15 +57,41 @@ func readPng(filename string) (image.Image, os.Error) {
 	return png.Decode(f)
 }
 
+func readJpeg(filename string) (image.Image, error) {
+	f, err := os.Open(filename)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return jpeg.Decode(f)
+}
+
 func TestWriteToDisk(t *testing.T) {
 	tc := testCase[len(testCase)-1]
-	msg := "Hello world!";
+	msg := "Hello world!"
 
-	i, err := readPng(tc.filename)
-	if err != nil {
-		t.Error(tc.filename, err)
+	// i, err := readPng(tc.filename)
+	// if err != nil {
+	// 	t.Error(tc.filename, err)
+	// }
+
+	var i image.Image
+	var err error
+	if strings.HasSuffix(tc.filename, ".png") {
+		i, err = readPng(tc.filename)
+		if err != nil {
+			t.Error(tc.filename, err)
+			return
+		}
+	} else {
+		i, err = readJpeg(tc.filename)
+		if err != nil {
+			t.Error(tc.filename, err)
+			return
+		}
 	}
-	f, err := os.Create("testdata/output.jpeg")
+
+	f, err := os.Create("testdata/lena2_out.jpeg")
 	if err != nil {
 		t.Error(tc.filename, err)
 	}
@@ -64,24 +103,35 @@ func TestWriteToDisk(t *testing.T) {
 
 func TestWriter(t *testing.T) {
 	for _, tc := range testCase {
-		msg := "Hello world; or こんにちは 世界!";
+		msg := "Hello world; or こんにちは 世界!"
 
+		var m0 image.Image
+		var err error
 		// Read the image.
-		m0, err := readPng(tc.filename)
-		if err != nil {
-			t.Error(tc.filename, err)
-			continue
+		if strings.HasSuffix(tc.filename, ".png") {
+			m0, err = readPng(tc.filename)
+			if err != nil {
+				t.Error(tc.filename, err)
+				continue
+			}
+		} else {
+			m0, err = readJpeg(tc.filename)
+			if err != nil {
+				t.Error(tc.filename, err)
+				continue
+			}
 		}
+
 		// Encode that image as JPEG.
 		buf := bytes.NewBuffer(nil)
-		err = Encode(buf, m0, msg, &Options{Quality: tc.quality})	
+		err = Encode(buf, m0, msg, &Options{Quality: tc.quality})
 		if err != nil {
 			t.Error(tc.filename, err)
 			continue
 		}
 		// Decode that JPEG.
 		m1, data, err := DecodeAndRead(buf)
-		
+
 		if data != msg {
 			t.Error("Got wrong message back:", data)
 		}
@@ -115,13 +165,13 @@ func TestWriter(t *testing.T) {
 
 func BenchmarkEncodeRGBOpaque(b *testing.B) {
 	b.StopTimer()
-	img := image.NewRGBA(640, 480)
+	img := image.NewRGBA(image.Rect(0, 0, 640, 480))
 	// Set all pixels to 0xFF alpha to force opaque mode.
 	bo := img.Bounds()
 	rnd := rand.New(rand.NewSource(123))
 	for y := bo.Min.Y; y < bo.Max.Y; y++ {
 		for x := bo.Min.X; x < bo.Max.X; x++ {
-			img.Set(x, y, image.RGBAColor{
+			img.Set(x, y, color.RGBA{
 				uint8(rnd.Intn(256)),
 				uint8(rnd.Intn(256)),
 				uint8(rnd.Intn(256)),

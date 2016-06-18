@@ -5,28 +5,34 @@
 // Package jpeg implements a JPEG image decoder and encoder.
 //
 // JPEG is defined in ITU-T T.81: http://www.w3.org/Graphics/JPEG/itu-t81.pdf.
-package strogonoff 
+package strogonoff
 
 import (
 	"bufio"
+	"fmt"
 	"image"
-	"image/ycbcr"
+	"image/color"
 	"io"
-	"os"
 )
 
 // TODO(nigeltao): fix up the doc comment style so that sentences start with
 // the name of the type or function that they annotate.
 
-// A FormatError reports that the input is not a valid JPEG.
-type FormatError string
+// FormatError reports that the input is not a valid JPEG.
+//type FormatError string
+func FormatError(s string) error {
+	return fmt.Errorf("invalid JPEG format: %v", s)
+}
 
-func (e FormatError) String() string { return "invalid JPEG format: " + string(e) }
+// func (e FormatError) String() string { return "invalid JPEG format: " + string(e) }
 
-// An UnsupportedError reports that the input uses a valid but unimplemented JPEG feature.
-type UnsupportedError string
+// UnsupportedError reports that the input uses a valid but unimplemented JPEG feature.
+// type UnsupportedError string
+func UnsupportedError(s string) error {
+	return fmt.Errorf("unsupported JPEG feature: %v", s)
+}
 
-func (e UnsupportedError) String() string { return "unsupported JPEG feature: " + string(e) }
+// func (e UnsupportedError) String() string { return "unsupported JPEG feature: " + string(e) }
 
 // Component specification, specified in section B.2.2.
 type component struct {
@@ -84,7 +90,7 @@ var unzig = [blockSize]int{
 // If the passed in io.Reader does not also have ReadByte, then Decode will introduce its own buffering.
 type Reader interface {
 	io.Reader
-	ReadByte() (c byte, err os.Error)
+	ReadByte() (c byte, err error)
 }
 
 type decoder struct {
@@ -93,7 +99,7 @@ type decoder struct {
 	data_bit      int
 	data_finished bool
 	width, height int
-	img           *ycbcr.YCbCr
+	img           *image.YCbCr
 	ri            int // Restart Interval.
 	comps         [nComponent]component
 	huff          [maxTc + 1][maxTh + 1]huffman
@@ -104,7 +110,7 @@ type decoder struct {
 }
 
 // Reads and ignores the next n bytes.
-func (d *decoder) ignore(n int) os.Error {
+func (d *decoder) ignore(n int) error {
 	for n > 0 {
 		m := len(d.tmp)
 		if m > n {
@@ -120,7 +126,7 @@ func (d *decoder) ignore(n int) os.Error {
 }
 
 // Specified in section B.2.2.
-func (d *decoder) processSOF(n int) os.Error {
+func (d *decoder) processSOF(n int) error {
 	if n != 6+3*nComponent {
 		return UnsupportedError("SOF has wrong length")
 	}
@@ -160,7 +166,7 @@ func (d *decoder) processSOF(n int) os.Error {
 }
 
 // Specified in section B.2.4.1.
-func (d *decoder) processDQT(n int) os.Error {
+func (d *decoder) processDQT(n int) error {
 	const qtLength = 1 + blockSize
 	for ; n >= qtLength; n -= qtLength {
 		_, err := io.ReadFull(d.r, d.tmp[0:qtLength])
@@ -225,7 +231,7 @@ func (d *decoder) storeMCU(mx, my int) {
 }
 
 // Specified in section B.2.3.
-func (d *decoder) processSOS(n int) os.Error {
+func (d *decoder) processSOS(n int) error {
 	if n != 4+2*nComponent {
 		return UnsupportedError("SOS has wrong length")
 	}
@@ -253,20 +259,20 @@ func (d *decoder) processSOS(n int) os.Error {
 	mxx := (d.width + 8*h0 - 1) / (8 * h0)
 	myy := (d.height + 8*v0 - 1) / (8 * v0)
 	if d.img == nil {
-		var subsampleRatio ycbcr.SubsampleRatio
+		var subsampleRatio image.YCbCrSubsampleRatio
 		n := h0 * v0
 		switch n {
 		case 1:
-			subsampleRatio = ycbcr.SubsampleRatio444
+			subsampleRatio = image.YCbCrSubsampleRatio444
 		case 2:
-			subsampleRatio = ycbcr.SubsampleRatio422
+			subsampleRatio = image.YCbCrSubsampleRatio422
 		case 4:
-			subsampleRatio = ycbcr.SubsampleRatio420
+			subsampleRatio = image.YCbCrSubsampleRatio420
 		default:
 			panic("unreachable")
 		}
 		b := make([]byte, mxx*myy*(1*8*8*n+2*8*8))
-		d.img = &ycbcr.YCbCr{
+		d.img = &image.YCbCr{
 			Y:              b[mxx*myy*(0*8*8*n+0*8*8) : mxx*myy*(1*8*8*n+0*8*8)],
 			Cb:             b[mxx*myy*(1*8*8*n+0*8*8) : mxx*myy*(1*8*8*n+1*8*8)],
 			Cr:             b[mxx*myy*(1*8*8*n+1*8*8) : mxx*myy*(1*8*8*n+2*8*8)],
@@ -326,14 +332,14 @@ func (d *decoder) processSOS(n int) os.Error {
 								if d.data_bit == 0 {
 									d.data = append(d.data, byte(bit))
 								} else {
-									d.data[len(d.data) - 1] = d.data[len(d.data) - 1] << 1
+									d.data[len(d.data)-1] = d.data[len(d.data)-1] << 1
 									if bit != 0 {
-										d.data[len(d.data) - 1] |= 1
+										d.data[len(d.data)-1] |= 1
 									}
 								}
 								d.data_bit = (d.data_bit + 1) % 8
-								if d.data_bit == 0 && d.data[len(d.data) - 1] == 0 {
-									d.data = d.data[:len(d.data) - 1]
+								if d.data_bit == 0 && d.data[len(d.data)-1] == 0 {
+									d.data = d.data[:len(d.data)-1]
 									d.data_finished = true
 								}
 							}
@@ -342,7 +348,7 @@ func (d *decoder) processSOS(n int) os.Error {
 								break
 							}
 							k += 0x0f
-						}	
+						}
 					}
 
 					idct(&d.blocks[i][j])
@@ -378,7 +384,7 @@ func (d *decoder) processSOS(n int) os.Error {
 }
 
 // Specified in section B.2.4.4.
-func (d *decoder) processDRI(n int) os.Error {
+func (d *decoder) processDRI(n int) error {
 	if n != 2 {
 		return FormatError("DRI has wrong length")
 	}
@@ -391,7 +397,7 @@ func (d *decoder) processDRI(n int) os.Error {
 }
 
 // decode reads a JPEG image from r and returns it as an image.Image.
-func (d *decoder) decode(r io.Reader, configOnly bool) (image.Image, os.Error) {
+func (d *decoder) decode(r io.Reader, configOnly bool) (image.Image, error) {
 	if rr, ok := r.(Reader); ok {
 		d.r = rr
 	} else {
@@ -461,13 +467,13 @@ func (d *decoder) decode(r io.Reader, configOnly bool) (image.Image, os.Error) {
 }
 
 // Decode reads a JPEG image from r and returns it as an image.Image.
-func Decode(r io.Reader) (image.Image, os.Error) {
+func Decode(r io.Reader) (image.Image, error) {
 	var d decoder
 	return d.decode(r, false)
 }
 
-// 
-func DecodeAndRead(r io.Reader) (image.Image, string, os.Error) {
+//
+func DecodeAndRead(r io.Reader) (image.Image, string, error) {
 	var d decoder
 	i, err := d.decode(r, false)
 	return i, string(d.data), err
@@ -475,12 +481,12 @@ func DecodeAndRead(r io.Reader) (image.Image, string, os.Error) {
 
 // DecodeConfig returns the color model and dimensions of a JPEG image without
 // decoding the entire image.
-func DecodeConfig(r io.Reader) (image.Config, os.Error) {
+func DecodeConfig(r io.Reader) (image.Config, error) {
 	var d decoder
 	if _, err := d.decode(r, true); err != nil {
 		return image.Config{}, err
 	}
-	return image.Config{image.RGBAColorModel, d.width, d.height}, nil
+	return image.Config{color.RGBAModel, d.width, d.height}, nil
 }
 
 func init() {
