@@ -1,3 +1,13 @@
+
+## From ymonk ##
+The orginal Strogonoff package was written in 2011 based on early version of Go standard library. Therefore it failed compilation when I first tried in June 2016.
+
+I modified the code and made it compatible with Go 1.6, and passed all tests. Now it can be used in new projects.
+
+
+
+
+
 About
 -----
 
