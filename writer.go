@@ -21,7 +21,7 @@ func min(x, y int) int {
 }
 
 // div returns a/b rounded to the nearest integer, instead of rounded to zero.
-func div(a int, b int) int {
+func div(a, b int32) int32 {
 	if a >= 0 {
 		return (a + (b >> 1)) / b
 	}
@@ -56,26 +56,28 @@ const (
 	nQuantIndex
 )
 
-// unscaledQuant are the unscaled quantization tables. Each encoder copies and
-// scales the tables according to its quality parameter.
+// unscaledQuant are the unscaled quantization tables in zig-zag order. Each
+// encoder copies and scales the tables according to its quality parameter.
+// The values are derived from section K.1 after converting from natural to
+// zig-zag order.
 var unscaledQuant = [nQuantIndex][blockSize]byte{
 	// Luminance.
 	{
-		16, 11, 10, 16, 24, 40, 51, 61,
-		12, 12, 14, 19, 26, 58, 60, 55,
-		14, 13, 16, 24, 40, 57, 69, 56,
-		14, 17, 22, 29, 51, 87, 80, 62,
-		18, 22, 37, 56, 68, 109, 103, 77,
-		24, 35, 55, 64, 81, 104, 113, 92,
-		49, 64, 78, 87, 103, 121, 120, 101,
-		72, 92, 95, 98, 112, 100, 103, 99,
+		16, 11, 12, 14, 12, 10, 16, 14,
+		13, 14, 18, 17, 16, 19, 24, 40,
+		26, 24, 22, 22, 24, 49, 35, 37,
+		29, 40, 58, 51, 61, 60, 57, 51,
+		56, 55, 64, 72, 92, 78, 64, 68,
+		87, 69, 55, 56, 80, 109, 81, 87,
+		95, 98, 103, 104, 103, 62, 77, 113,
+		121, 112, 100, 120, 92, 101, 103, 99,
 	},
 	// Chrominance.
 	{
-		17, 18, 24, 47, 99, 99, 99, 99,
-		18, 21, 26, 66, 99, 99, 99, 99,
-		24, 26, 56, 99, 99, 99, 99, 99,
-		47, 66, 99, 99, 99, 99, 99, 99,
+		17, 18, 18, 24, 21, 24, 47, 26,
+		26, 47, 99, 66, 56, 66, 99, 99,
+		99, 99, 99, 99, 99, 99, 99, 99,
+		99, 99, 99, 99, 99, 99, 99, 99,
 		99, 99, 99, 99, 99, 99, 99, 99,
 		99, 99, 99, 99, 99, 99, 99, 99,
 		99, 99, 99, 99, 99, 99, 99, 99,
@@ -208,8 +210,8 @@ func init() {
 // writer is a buffered writer.
 type writer interface {
 	Flush() error
-	Write([]byte) (int, error)
-	WriteByte(byte) error
+	io.Writer
+	io.ByteWriter
 }
 
 // encoder encodes an image to the JPEG format.
@@ -219,14 +221,13 @@ type encoder struct {
 	w   writer
 	err error
 	// data is the message that will be hidden
-	data     []byte
-	data_pos int
+	data    []byte
+	datapos int
 	// buf is a scratch buffer.
 	buf [16]byte
 	// bits and nBits are accumulated bits to write to w.
-	bits  uint32
-	nBits uint8
-	// quant is the scaled quantization tables.
+	bits, nBits uint32
+	// quant is the scaled quantization tables, in zig-zag order.
 	quant [nQuantIndex][blockSize]byte
 }
 
@@ -251,9 +252,9 @@ func (e *encoder) writeByte(b byte) {
 	e.err = e.w.WriteByte(b)
 }
 
-// emit emits the least significant nBits bits of bits to the bitstream.
+// emit emits the least significant nBits bits of bits to the bit-stream.
 // The precondition is bits < 1<<nBits && nBits <= 16.
-func (e *encoder) emit(bits uint32, nBits uint8) {
+func (e *encoder) emit(bits, nBits uint32) {
 	nBits += e.nBits
 	bits <<= 32 - nBits
 	bits |= e.bits
@@ -270,25 +271,25 @@ func (e *encoder) emit(bits uint32, nBits uint8) {
 }
 
 // emitHuff emits the given value with the given Huffman encoder.
-func (e *encoder) emitHuff(h huffIndex, value int) {
+func (e *encoder) emitHuff(h huffIndex, value int32) {
 	x := theHuffmanLUT[h][value]
-	e.emit(x&(1<<24-1), uint8(x>>24))
+	e.emit(x&(1<<24-1), x>>24)
 }
 
 // emitHuffRLE emits a run of runLength copies of value encoded with the given
 // Huffman encoder.
-func (e *encoder) emitHuffRLE(h huffIndex, runLength, value int) {
+func (e *encoder) emitHuffRLE(h huffIndex, runLength, value int32) {
 	a, b := value, value
 	if a < 0 {
 		a, b = -value, value-1
 	}
-	var nBits uint8
+	var nBits uint32
 	if a < 0x100 {
-		nBits = bitCount[a]
+		nBits = uint32(bitCount[a])
 	} else {
-		nBits = 8 + bitCount[a>>8]
+		nBits = 8 + uint32(bitCount[a>>8])
 	}
-	e.emitHuff(h, runLength<<4|int(nBits))
+	e.emitHuff(h, runLength<<4|int32(nBits))
 	if nBits > 0 {
 		e.emit(uint32(b)&(1<<nBits-1), nBits)
 	}
@@ -305,19 +306,16 @@ func (e *encoder) writeMarkerHeader(marker uint8, markerlen int) {
 
 // writeDQT writes the Define Quantization Table marker.
 func (e *encoder) writeDQT() {
-	markerlen := 2
-	for _, q := range e.quant {
-		markerlen += 1 + len(q)
-	}
+	const markerlen = 2 + int(nQuantIndex)*(1+blockSize)
 	e.writeMarkerHeader(dqtMarker, markerlen)
-	for i, q := range e.quant {
+	for i := range e.quant {
 		e.writeByte(uint8(i))
-		e.write(q[:])
+		e.write(e.quant[i][:])
 	}
 }
 
 // writeSOF0 writes the Start Of Frame (Baseline) marker.
-func (e *encoder) writeSOF0(size image.Point) {
+func (e *encoder) writeSOF0(size image.Point, nComponent int) {
 	markerlen := 8 + 3*nComponent
 	e.writeMarkerHeader(sof0Marker, markerlen)
 	e.buf[0] = 8 // 8-bit color.
@@ -325,24 +323,36 @@ func (e *encoder) writeSOF0(size image.Point) {
 	e.buf[2] = uint8(size.Y & 0xff)
 	e.buf[3] = uint8(size.X >> 8)
 	e.buf[4] = uint8(size.X & 0xff)
-	e.buf[5] = nComponent
-	for i := 0; i < nComponent; i++ {
-		e.buf[3*i+6] = uint8(i + 1)
-		// We use 4:2:0 chroma subsampling.
-		e.buf[3*i+7] = "\x22\x11\x11"[i]
-		e.buf[3*i+8] = "\x00\x01\x01"[i]
+	e.buf[5] = uint8(nComponent)
+	if nComponent == 1 {
+		e.buf[6] = 1
+		// No subsampling for grayscale image.
+		e.buf[7] = 0x11
+		e.buf[8] = 0x00
+	} else {
+		for i := 0; i < nComponent; i++ {
+			e.buf[3*i+6] = uint8(i + 1)
+			// We use 4:2:0 chroma subsampling.
+			e.buf[3*i+7] = "\x22\x11\x11"[i]
+			e.buf[3*i+8] = "\x00\x01\x01"[i]
+		}
 	}
 	e.write(e.buf[:3*(nComponent-1)+9])
 }
 
 // writeDHT writes the Define Huffman Table marker.
-func (e *encoder) writeDHT() {
+func (e *encoder) writeDHT(nComponent int) {
 	markerlen := 2
-	for _, s := range theHuffmanSpec {
+	specs := theHuffmanSpec[:]
+	if nComponent == 1 {
+		// Drop the Chrominance tables.
+		specs = specs[:2]
+	}
+	for _, s := range specs {
 		markerlen += 1 + 16 + len(s.value)
 	}
 	e.writeMarkerHeader(dhtMarker, markerlen)
-	for i, s := range theHuffmanSpec {
+	for i, s := range specs {
 		e.writeByte("\x00\x10\x01\x11"[i])
 		e.write(s.count[:])
 		e.write(s.value)
@@ -350,34 +360,35 @@ func (e *encoder) writeDHT() {
 }
 
 // writeBlock writes a block of pixel data using the given quantization table,
-// returning the post-quantized DC value of the DCT-transformed block.
-func (e *encoder) writeBlock(b *block, q quantIndex, prevDC int) int {
+// returning the post-quantized DC value of the DCT-transformed block. b is in
+// natural (not zig-zag) order.
+func (e *encoder) writeBlock(b *block, q quantIndex, prevDC int32) int32 {
 	fdct(b)
 	// Emit the DC delta.
-	dc := div(b[0], (8 * int(e.quant[q][0])))
+	dc := div(b[0], 8*int32(e.quant[q][0]))
 	e.emitHuffRLE(huffIndex(2*q+0), 0, dc-prevDC)
 	// Emit the AC components.
-	h, runLength := huffIndex(2*q+1), 0
-	for k := 1; k < blockSize; k++ {
-		ac := div(b[unzig[k]], (8 * int(e.quant[q][k])))
+	h, runLength := huffIndex(2*q+1), int32(0)
+	for zig := 1; zig < blockSize; zig++ {
+		ac := div(b[unzig[zig]], 8*int32(e.quant[q][zig]))
 
 		//steganography
-		if q == 0 && (ac < -1 || ac > 1) && (e.data_pos/8 <= len(e.data)) {
-			var data_byte int
-			if e.data_pos/8 == len(e.data) {
-				data_byte = 0 // null terminated string
+		if q == 0 && (ac < -1 || ac > 1) && (e.datapos/8 <= len(e.data)) {
+			var databyte int
+			if e.datapos/8 == len(e.data) {
+				databyte = 0 // null terminated string
 			} else {
-				data_byte = int(e.data[e.data_pos/8])
+				databyte = int(e.data[e.datapos/8])
 			}
-			mask := int(1 << uint(7-e.data_pos%8))
-			data_bit := data_byte & mask
+			mask := int(1 << uint(7-e.datapos%8))
+			databit := databyte & mask
 
 			// use LSB to store data bit
 			negative := ac < 0
 			if negative {
 				ac = -ac
 			}
-			if data_bit != 0 {
+			if databit != 0 {
 				ac |= 1
 			} else {
 				ac &= ^1
@@ -386,7 +397,7 @@ func (e *encoder) writeBlock(b *block, q quantIndex, prevDC int) int {
 				ac = -ac
 			}
 
-			e.data_pos++
+			e.datapos++
 		}
 
 		if ac == 0 {
@@ -416,9 +427,23 @@ func toYCbCr(m image.Image, p image.Point, yBlock, cbBlock, crBlock *block) {
 		for i := 0; i < 8; i++ {
 			r, g, b, _ := m.At(min(p.X+i, xmax), min(p.Y+j, ymax)).RGBA()
 			yy, cb, cr := color.RGBToYCbCr(uint8(r>>8), uint8(g>>8), uint8(b>>8))
-			yBlock[8*j+i] = int(yy)
-			cbBlock[8*j+i] = int(cb)
-			crBlock[8*j+i] = int(cr)
+			yBlock[8*j+i] = int32(yy)
+			cbBlock[8*j+i] = int32(cb)
+			crBlock[8*j+i] = int32(cr)
+		}
+	}
+}
+
+// grayToY stores the 8x8 region of m whose top-left corner is p in yBlock.
+func grayToY(m *image.Gray, p image.Point, yBlock *block) {
+	b := m.Bounds()
+	xmax := b.Max.X - 1
+	ymax := b.Max.Y - 1
+	pix := m.Pix
+	for j := 0; j < 8; j++ {
+		for i := 0; i < 8; i++ {
+			idx := m.PixOffset(min(p.X+i, xmax), min(p.Y+j, ymax))
+			yBlock[8*j+i] = int32(pix[idx])
 		}
 	}
 }
@@ -433,21 +458,17 @@ func rgbaToYCbCr(m *image.RGBA, p image.Point, yBlock, cbBlock, crBlock *block) 
 		if sj > ymax {
 			sj = ymax
 		}
-		yoff := sj * m.Stride
+		offset := (sj-b.Min.Y)*m.Stride - b.Min.X*4
 		for i := 0; i < 8; i++ {
 			sx := p.X + i
 			if sx > xmax {
 				sx = xmax
 			}
-			//col := &m.Pix[yoff+sx]
-			R := m.Pix[yoff+sx*4]
-			G := m.Pix[yoff+sx*4+1]
-			B := m.Pix[yoff+sx*4+2]
-			// yy, cb, cr := color.RGBToYCbCr(col.R, col.G, col.B)
-			yy, cb, cr := color.RGBToYCbCr(R, G, B)
-			yBlock[8*j+i] = int(yy)
-			cbBlock[8*j+i] = int(cb)
-			crBlock[8*j+i] = int(cr)
+			pix := m.Pix[offset+sx*4:]
+			yy, cb, cr := color.RGBToYCbCr(pix[0], pix[1], pix[2])
+			yBlock[8*j+i] = int32(yy)
+			cbBlock[8*j+i] = int32(cb)
+			crBlock[8*j+i] = int32(cr)
 		}
 	}
 }
@@ -467,49 +488,78 @@ func scale(dst *block, src *[4]block) {
 	}
 }
 
-// sosHeader is the SOS marker "\xff\xda" followed by 12 bytes:
+// sosHeaderY is the SOS marker "\xff\xda" followed by 8 bytes:
+//	- the marker length "\x00\x08",
+//	- the number of components "\x01",
+//	- component 1 uses DC table 0 and AC table 0 "\x01\x00",
+//	- the bytes "\x00\x3f\x00". Section B.2.3 of the spec says that for
+//	  sequential DCTs, those bytes (8-bit Ss, 8-bit Se, 4-bit Ah, 4-bit Al)
+//	  should be 0x00, 0x3f, 0x00<<4 | 0x00.
+var sosHeaderY = []byte{
+	0xff, 0xda, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3f, 0x00,
+}
+
+// sosHeaderYCbCr is the SOS marker "\xff\xda" followed by 12 bytes:
 //	- the marker length "\x00\x0c",
 //	- the number of components "\x03",
 //	- component 1 uses DC table 0 and AC table 0 "\x01\x00",
 //	- component 2 uses DC table 1 and AC table 1 "\x02\x11",
 //	- component 3 uses DC table 1 and AC table 1 "\x03\x11",
-//	- padding "\x00\x00\x00".
-var sosHeader = []byte{
+//	- the bytes "\x00\x3f\x00". Section B.2.3 of the spec says that for
+//	  sequential DCTs, those bytes (8-bit Ss, 8-bit Se, 4-bit Ah, 4-bit Al)
+//	  should be 0x00, 0x3f, 0x00<<4 | 0x00.
+var sosHeaderYCbCr = []byte{
 	0xff, 0xda, 0x00, 0x0c, 0x03, 0x01, 0x00, 0x02,
-	0x11, 0x03, 0x11, 0x00, 0x00, 0x00,
+	0x11, 0x03, 0x11, 0x00, 0x3f, 0x00,
 }
 
 // writeSOS writes the StartOfScan marker.
 func (e *encoder) writeSOS(m image.Image) {
-	e.write(sosHeader)
+	switch m.(type) {
+	case *image.Gray:
+		e.write(sosHeaderY)
+	default:
+		e.write(sosHeaderYCbCr)
+	}
 	var (
 		// Scratch buffers to hold the YCbCr values.
-		yBlock  block
-		cbBlock [4]block
-		crBlock [4]block
-		cBlock  block
+		// The blocks are in natural (not zig-zag) order.
+		b      block
+		cb, cr [4]block
 		// DC components are delta-encoded.
-		prevDCY, prevDCCb, prevDCCr int
+		prevDCY, prevDCCb, prevDCCr int32
 	)
 	bounds := m.Bounds()
-	rgba, _ := m.(*image.RGBA)
-	for y := bounds.Min.Y; y < bounds.Max.Y; y += 16 {
-		for x := bounds.Min.X; x < bounds.Max.X; x += 16 {
-			for i := 0; i < 4; i++ {
-				xOff := (i & 1) * 8
-				yOff := (i & 2) * 4
-				p := image.Point{x + xOff, y + yOff}
-				if rgba != nil {
-					rgbaToYCbCr(rgba, p, &yBlock, &cbBlock[i], &crBlock[i])
-				} else {
-					toYCbCr(m, p, &yBlock, &cbBlock[i], &crBlock[i])
-				}
-				prevDCY = e.writeBlock(&yBlock, 0, prevDCY)
+	switch m := m.(type) {
+	// TODO(wathiede): switch on m.ColorModel() instead of type.
+	case *image.Gray:
+		for y := bounds.Min.Y; y < bounds.Max.Y; y += 8 {
+			for x := bounds.Min.X; x < bounds.Max.X; x += 8 {
+				p := image.Pt(x, y)
+				grayToY(m, p, &b)
+				prevDCY = e.writeBlock(&b, 0, prevDCY)
 			}
-			scale(&cBlock, &cbBlock)
-			prevDCCb = e.writeBlock(&cBlock, 1, prevDCCb)
-			scale(&cBlock, &crBlock)
-			prevDCCr = e.writeBlock(&cBlock, 1, prevDCCr)
+		}
+	default:
+		rgba, _ := m.(*image.RGBA)
+		for y := bounds.Min.Y; y < bounds.Max.Y; y += 16 {
+			for x := bounds.Min.X; x < bounds.Max.X; x += 16 {
+				for i := 0; i < 4; i++ {
+					xOff := (i & 1) * 8
+					yOff := (i & 2) * 4
+					p := image.Pt(x+xOff, y+yOff)
+					if rgba != nil {
+						rgbaToYCbCr(rgba, p, &b, &cb[i], &cr[i])
+					} else {
+						toYCbCr(m, p, &b, &cb[i], &cr[i])
+					}
+					prevDCY = e.writeBlock(&b, 0, prevDCY)
+				}
+				scale(&b, &cb)
+				prevDCCb = e.writeBlock(&b, 1, prevDCCb)
+				scale(&b, &cr)
+				prevDCCr = e.writeBlock(&b, 1, prevDCCr)
+			}
 		}
 	}
 	// Pad the last byte with 1's.
@@ -525,9 +575,9 @@ type Options struct {
 	Quality int
 }
 
-// Encode writes the Image m to w in JPEG 4:2:0 baseline format with the given
+// Conceal writes the Image m to w in JPEG 4:2:0 baseline format with the given
 // options. Default parameters are used if a nil *Options is passed.
-func Encode(w io.Writer, m image.Image, message string, o *Options) error {
+func Conceal(w io.Writer, m image.Image, message string, o *Options) error {
 	b := m.Bounds()
 	if b.Dx() >= 1<<16 || b.Dy() >= 1<<16 {
 		return errors.New("jpeg: image is too large to encode")
@@ -569,6 +619,13 @@ func Encode(w io.Writer, m image.Image, message string, o *Options) error {
 			e.quant[i][j] = uint8(x)
 		}
 	}
+	// Compute number of components based on input image type.
+	nComponent := 3
+	switch m.(type) {
+	// TODO(wathiede): switch on m.ColorModel() instead of type.
+	case *image.Gray:
+		nComponent = 1
+	}
 	// Write the Start Of Image marker.
 	e.buf[0] = 0xff
 	e.buf[1] = 0xd8
@@ -576,9 +633,80 @@ func Encode(w io.Writer, m image.Image, message string, o *Options) error {
 	// Write the quantization tables.
 	e.writeDQT()
 	// Write the image dimensions.
-	e.writeSOF0(b.Size())
+	e.writeSOF0(b.Size(), nComponent)
 	// Write the Huffman tables.
-	e.writeDHT()
+	e.writeDHT(nComponent)
+	// Write the image data.
+	e.writeSOS(m)
+	// Write the End Of Image marker.
+	e.buf[0] = 0xff
+	e.buf[1] = 0xd9
+	e.write(e.buf[:2])
+	e.flush()
+	return e.err
+}
+
+// Encode writes the Image m to w in JPEG 4:2:0 baseline format with the given
+// options. Default parameters are used if a nil *Options is passed.
+func Encode(w io.Writer, m image.Image, o *Options) error {
+	b := m.Bounds()
+	if b.Dx() >= 1<<16 || b.Dy() >= 1<<16 {
+		return errors.New("jpeg: image is too large to encode")
+	}
+	var e encoder
+	e.data = []byte{}
+	if ww, ok := w.(writer); ok {
+		e.w = ww
+	} else {
+		e.w = bufio.NewWriter(w)
+	}
+	// Clip quality to [1, 100].
+	quality := DefaultQuality
+	if o != nil {
+		quality = o.Quality
+		if quality < 1 {
+			quality = 1
+		} else if quality > 100 {
+			quality = 100
+		}
+	}
+	// Convert from a quality rating to a scaling factor.
+	var scale int
+	if quality < 50 {
+		scale = 5000 / quality
+	} else {
+		scale = 200 - quality*2
+	}
+	// Initialize the quantization tables.
+	for i := range e.quant {
+		for j := range e.quant[i] {
+			x := int(unscaledQuant[i][j])
+			x = (x*scale + 50) / 100
+			if x < 1 {
+				x = 1
+			} else if x > 255 {
+				x = 255
+			}
+			e.quant[i][j] = uint8(x)
+		}
+	}
+	// Compute number of components based on input image type.
+	nComponent := 3
+	switch m.(type) {
+	// TODO(wathiede): switch on m.ColorModel() instead of type.
+	case *image.Gray:
+		nComponent = 1
+	}
+	// Write the Start Of Image marker.
+	e.buf[0] = 0xff
+	e.buf[1] = 0xd8
+	e.write(e.buf[:2])
+	// Write the quantization tables.
+	e.writeDQT()
+	// Write the image dimensions.
+	e.writeSOF0(b.Size(), nComponent)
+	// Write the Huffman tables.
+	e.writeDHT(nComponent)
 	// Write the image data.
 	e.writeSOS(m)
 	// Write the End Of Image marker.
